@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,9 +29,13 @@ import androidx.compose.material.BottomNavigationItem
 import androidx.compose.material.ButtonColors
 import androidx.compose.material.ProvideTextStyle
 import androidx.compose.material.contentColorFor
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Shapes
@@ -45,6 +50,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,11 +76,15 @@ import com.dogancanemek.bibliotheca.ui.theme.BibliothecaTheme
 import com.dogancanemek.bibliotheca.ui.theme.MyDarkColor
 import com.dogancanemek.bibliotheca.ui.theme.MyLightColor
 import com.dogancanemek.bibliotheca.ui.theme.MyThemeColor
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.ktx.auth
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.ValueEventListener
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 val db =
@@ -99,25 +109,45 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AppNavigation(paddingValues: PaddingValues, navController: NavHostController) {
+fun AppNavigation(
+    paddingValues: PaddingValues,
+    navController: NavHostController,
+    username: String
+) {
     var latestStory by remember { mutableStateOf<Stories?>(null) }
+    var latestReadStory by remember { mutableStateOf<ReadByUser?>(null) }
+    val auth = Firebase.auth
+    val currentUser =
+        remember { mutableStateOf<FirebaseUser?>(auth.currentUser) } // Remember initial state
+
+    // Observe auth state changes, but don't change initial destination
+    LaunchedEffect(Unit) {
+        auth.addAuthStateListener { user ->
+            currentUser.value = user.currentUser
+        }
+    }
+
+    val user = currentUser.value
+
     NavHost(
         navController = navController,
-        startDestination = "auth_options",
+        startDestination = if (user == null) "sign_in" else "story_list", // Set based on initial state
         modifier = Modifier.padding(paddingValues)
     ) {
-        composable("auth_options") { AuthOptions() }
+        composable("sign_in") { SignInForm(navController) } // Sign-in route
+        composable("sign_up") { SignUpForm(navController) } // Sign-up route
         composable("story_list") {
-            StoryList(navController, latestStory) { newLatestStory ->
+            StoryList(navController, username, latestStory) { newLatestStory ->
                 latestStory = newLatestStory
             }
         }
         composable("writing_area") { WritingArea() }
-        composable("read_by_me") { ReadByMe() }
-        // Add a route for ReadingArea with arguments
-        composable("reading_area") {
-            ReadingArea(latestStory) // Pass only latestStory
+        composable("read_by_me") {
+            ReadByMe(navController, username, latestReadStory) { newLatestStory ->
+                latestReadStory = newLatestStory
+            }
         }
+        composable("reading_area") { ReadingArea(latestStory) }
     }
 }
 
@@ -126,12 +156,32 @@ fun AppContent() {
     val navController = rememberNavController()
     var showBottomBar by remember { mutableStateOf(true) } // State for bottom bar visibility
 
+    val auth = Firebase.auth
+    val currentUser = auth.currentUser
+    val uid = currentUser?.uid
+
+    val usersRef = db.child("users").child(uid ?: "")
+
+    var username by remember { mutableStateOf("") }
+
+    LaunchedEffect(uid) { // Trigger when UID changes
+        usersRef.addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(dataSnapshot: DataSnapshot) {
+                username = dataSnapshot.child("username").getValue(String::class.java) ?: ""
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                // Handle error
+            }
+        })
+    }
+
     // Observe current route to control bottom bar visibility
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
     LaunchedEffect(currentRoute) {
-        showBottomBar = currentRoute != "auth_options"
+        showBottomBar = !(currentRoute == "sign_in" || currentRoute == "sign_up")
     }
 
     MaterialTheme(
@@ -145,28 +195,115 @@ fun AppContent() {
                 }
             }
         ) { paddingValues ->
-            AppNavigation(paddingValues, navController)
+            AppNavigation(paddingValues, navController, username)
         }
     }
 }
 
 @Composable
-fun AuthOptions() {
-    var showSignUp by remember { mutableStateOf(true) } // Toggle between sign-up and sign-in
+fun SignUpForm(navController: NavHostController) {
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var userName by remember { mutableStateOf("") } // Add for extra user data
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val auth = Firebase.auth
 
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        if (showSignUp) {
-            SignUpForm()
-            Button(onClick = { showSignUp = false }) {
+    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { contentPadding ->
+        Column(modifier = Modifier.padding(contentPadding)) {
+            TextField(
+                value = userName,
+                onValueChange = { userName = it },
+                label = { Text("Username") })
+            TextField(value = email, onValueChange = { email = it }, label = { Text("Email") })
+            TextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Password") }
+            )
+            Button(
+                colors = ButtonDefaults.buttonColors(containerColor = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary),
+                onClick = {
+                    // Create user with Firebase Authentication
+                    auth.createUserWithEmailAndPassword(email, password)
+                        .addOnCompleteListener { task ->
+                            if (task.isSuccessful) {
+                                // Sign up successful, store additional user data
+                                val user = auth.currentUser
+                                val usersRef = db.child("users").child(user?.uid ?: "")
+                                usersRef.setValue(
+                                    Users(
+                                        userName,
+                                        email
+                                    )
+                                ) // Store username and email
+                                    .addOnSuccessListener {
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("Sign up successful!")
+                                            navController.navigate("story_list")
+                                        }
+                                    }
+                                    .addOnFailureListener { exception ->
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("Failed to store user data: ${exception.message}")
+                                        }
+                                    }
+                            } else {
+                                // Sign up failed
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("Sign up failed: ${task.exception?.message}")
+                                }
+                            }
+                        }
+                }) {
+                Text("Sign Up")
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = { navController.navigate("sign_in") }) {
                 Text("Already have an account? Sign in")
             }
-        } else {
-            SignInForm()
-            Button(onClick = { showSignUp = true }) {
+        }
+    }
+}
+
+@Composable
+fun SignInForm(navController: NavHostController) { // Add NavHostController parameter
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val auth = Firebase.auth
+
+    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { contentPadding ->
+        Column(modifier = Modifier.padding(contentPadding)) {
+            TextField(value = email, onValueChange = { email = it }, label = { Text("Email") })
+            TextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Password") }
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                colors = ButtonDefaults.buttonColors(containerColor = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary),
+                onClick = {
+                    auth.signInWithEmailAndPassword(email, password)
+                        .addOnCompleteListener { task ->
+                            if (task.isSuccessful) {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("Sign in successful!")
+                                    navController.navigate("story_list")
+
+                                }
+                            } else {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("Sign in failed: ${task.exception?.message}")
+                                }
+                            }
+                        }
+                }) {
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = { navController.navigate("sign_up") }) {
                 Text("Don't have an account? Sign up")
             }
         }
@@ -174,60 +311,11 @@ fun AuthOptions() {
 }
 
 @Composable
-fun SignUpForm() {
-    var userName by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
-
-    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { contentPadding ->
-        Column(modifier = Modifier.padding(contentPadding)) {
-            TextField(value = userName, onValueChange = { userName = it }, label = { Text("Username") })
-            TextField(value = password, onValueChange = { password = it }, label = { Text("Password") })
-            Button(onClick = {
-                // Add user to Firebase
-                val usersRef = db.child("users").child(userName)
-                usersRef.child("password").setValue(password)
-                    .addOnSuccessListener {
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Sign up successful!")
-                        }
-                    }
-                    .addOnFailureListener { exception ->
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Sign up failed: ${exception.message}")
-                        }
-                    }
-            }) {
-                Text("Sign Up")
-            }
-        }
-    }
-}
-
-@Composable
-fun SignInForm() {
-    var userName by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
-
-    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { contentPadding ->
-        Column(modifier = Modifier.padding(contentPadding)) {
-            TextField(value = userName, onValueChange = { userName = it }, label = { Text("Username") })
-            TextField(value = password, onValueChange = { password = it }, label = { Text("Password") })
-            Button(onClick = {
-
-            }) {
-                Text("Sign In")
-            }
-        }
-    }
-}
-
-@Composable
 fun StoryList(
-    navController: NavHostController, latestStory: Stories?, onStoryClick: (Stories) -> Unit
+    navController: NavHostController,
+    username: String,
+    latestStory: Stories?,
+    onStoryClick: (Stories) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -235,21 +323,16 @@ fun StoryList(
             .fillMaxWidth()
     ) {
         // Display stories from Firebase (you'll need to implement this part)
-        StoriesFromFirebase(navController, onStoryClick)
-    }
-}
-
-fun writeNewStory(title: String, story: String) {
-    val newStory = Stories(title, story)
-    db.child("stories").child(title).setValue(newStory).addOnSuccessListener {
-        Log.d(TAG, "Story added successfully")
-    }.addOnFailureListener { exception ->
-        Log.e(TAG, "Failed to add story", exception)
+        StoriesFromFirebase(navController, username, onStoryClick)
     }
 }
 
 @Composable
-fun StoriesFromFirebase(navController: NavHostController, onStoryClick: (Stories) -> Unit) {
+fun StoriesFromFirebase(
+    navController: NavHostController,
+    username: String,
+    onStoryClick: (Stories) -> Unit
+) {
     var stories by remember { mutableStateOf<List<Stories>>(emptyList()) }
 
     // Fetch stories from Firebase when the composable enters the composition
@@ -273,35 +356,57 @@ fun StoriesFromFirebase(navController: NavHostController, onStoryClick: (Stories
 
     LazyColumn {
         items(stories) { story ->
-            Column(modifier = Modifier
-                .padding(8.dp)
-                .fillMaxWidth()
-                .clipToBounds()
-                .border(
-                    1.dp,
-                    if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
-                    shape = MaterialTheme.shapes.medium
-                )
-                .clickable {
-                    // Navigate to ReadingArea with title and story
-                    onStoryClick(story)
-                    navController.navigate("reading_area")
-                }) {
-                story.title?.let {
-                    Text(
-                        text = it,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        color = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
-                        modifier = Modifier.padding(8.dp)
+            Row(
+                modifier = Modifier
+                    .padding(8.dp)
+                    .fillMaxWidth()
+                    .clipToBounds()
+                    .border(
+                        1.dp,
+                        if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
+                        shape = MaterialTheme.shapes.medium
                     )
+                    .clickable {
+                        onStoryClick(story)
+                        navController.navigate("reading_area")
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween // Position items on opposite ends
+            ) {
+                Column(modifier = Modifier.weight(1f)) { // Text takes available space
+                    story.title?.let {
+                        Text(
+                            text = it,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                    story.story?.let {
+                        Text(
+                            text = it.split(" ").take(3).joinToString(" ") + "...",
+                            fontSize = 14.sp,
+                            color = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
                 }
-                story.story?.let {
-                    Text(
-                        text = it.split(" ").take(3).joinToString(" ") + "...",
-                        fontSize = 14.sp,
-                        color = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
-                        modifier = Modifier.padding(8.dp)
+                // Add your clickable icon here
+                IconButton(onClick = {
+                    story.title?.let {
+                        story.story?.let { it1 ->
+                            addToReadByMe(
+                                username,
+                                it,
+                                it1
+                            )
+                        }
+                    }
+                }) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = "Add to Read By Me",
+                        tint = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary
                     )
                 }
             }
@@ -413,8 +518,94 @@ fun WritingArea() {
 }
 
 @Composable
-fun ReadByMe() {
+fun ReadByMe(
+    navController: NavHostController,
+    username: String,
+    latestStory: ReadByUser?,
+    onStoryClick: (ReadByUser) -> Unit
+) {
+    if (username.isNotBlank()) { // Check for non-empty username
+        Column(
+            modifier = Modifier
+                .padding(8.dp)
+                .fillMaxWidth()
+        ) {
+            ReadStoriesFromFirebase(navController, username, onStoryClick)
+        }
+    } else {
+        // Handle case where username is empty
+        Text("No username provided")
+    }
+}
 
+@Composable
+fun ReadStoriesFromFirebase(
+    navController: NavHostController,
+    username: String,
+    onStoryClick: (ReadByUser) -> Unit,
+) {
+    var readByMe by remember { mutableStateOf<List<ReadByUser>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        val readByMeRef = db.child("read_by_me").child(username)
+        readByMeRef.addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(dataSnapshot: DataSnapshot) {
+                val fetchedStories = mutableListOf<ReadByUser>()
+                for (storySnapshot in dataSnapshot.children) {
+                    val story = storySnapshot.getValue(ReadByUser::class.java)
+                    story?.let {
+                        fetchedStories.add(it)
+                        Log.d(TAG, "Fetched story: $it")
+                    }
+                }
+                readByMe = fetchedStories
+            }
+
+            override fun onCancelled(databaseError: DatabaseError) {
+                Log.w(TAG, "loadStories:onCancelled", databaseError.toException())
+            }
+        })
+    }
+
+    LazyColumn {
+        items(readByMe) { story ->
+            Row(
+                modifier = Modifier
+                    .padding(8.dp)
+                    .fillMaxWidth()
+                    .clipToBounds()
+                    .border(
+                        1.dp,
+                        if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
+                        shape = MaterialTheme.shapes.medium
+                    )
+                    .clickable {
+                        onStoryClick(story)
+                        navController.navigate("reading_area")
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween // Position items on opposite ends
+            ) {
+                Column(modifier = Modifier.weight(1f)) { // Text takes available space
+                    story.title?.let {
+                        Text(
+                            text = it,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                    story.story?.let {
+                        Text(
+                            text = story.story.split(" ").take(3).joinToString(" ") + "...",
+                            fontSize = 14.sp,
+                            color = if (isSystemInDarkTheme()) LightColors.primary else DarkColors.primary,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -504,5 +695,27 @@ fun BottomNavigationBar(navController: NavHostController) {
             )
         }, selected = false,
             onClick = { navController.navigate("reading_area") })
+    }
+}
+
+fun addToReadByMe(username: String, title: String, story: String) {
+    if (username.isNotBlank()) {
+        val readByMe = ReadByUser(title, story)
+        db.child("read_by_me").child(username).push().setValue(readByMe) // Use push()
+            .addOnSuccessListener {
+                Log.d(TAG, "Story added successfully")
+            }
+            .addOnFailureListener { exception ->
+                Log.e(TAG, "Failed to add story", exception)
+            }
+    }
+}
+
+fun writeNewStory(title: String, story: String) {
+    val newStory = Stories(title, story)
+    db.child("stories").child(title).setValue(newStory).addOnSuccessListener {
+        Log.d(TAG, "Story added successfully")
+    }.addOnFailureListener { exception ->
+        Log.e(TAG, "Failed to add story", exception)
     }
 }
