@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "744016740841",
+    "project_id": "bibliotheca-621e8",
+    "storage_bucket": "bibliotheca-621e8.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:744016740841:android:f870a8122295b8f0aa0b78",
+        "android_client_info": {
+          "package_name": "com.dogancanemek.bibliotheca"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyANeOfRn5oyJUqmpMB5Z7izF2LSOlevceI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
